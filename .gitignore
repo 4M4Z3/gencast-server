@@ -45,3 +45,5 @@ Thumbs.db
 master_[0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv 
 
 service_acct.json
+
+.env

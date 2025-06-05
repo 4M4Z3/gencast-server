@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# Source environment variables from .env file
+if [ -f .env ]; then
+  source .env
+else
+  echo "Warning: .env file not found. Make sure SUPABASE_CONN and TABLE_NAME are set."
+fi
+
 # Exit on error
 set -e
 
@@ -23,7 +30,7 @@ gcloud auth activate-service-account --key-file="$SERVICE_ACCOUNT_FILE" || {
 # Set the project
 PROJECT="ultra-task-456813-d5"
 echo "Setting project to $PROJECT..."
-gcloud config set project "$PROJECT" || {
+yes | gcloud config set project "$PROJECT" || {
     echo "Error: Failed to set project"
     exit 1
 }
@@ -36,8 +43,8 @@ gcloud config get-value project
 
 # Use current date if no argument is provided
 if [ -z "$1" ]; then
-  DATE="2025-06-03"  # Default to 2025-06-03
-  echo "No date provided. Using default date: $DATE"
+  DATE=$(date +"%Y-%m-%d")  # Default to today's date
+  echo "No date provided. Using current date: $DATE"
 else
   DATE="$1"
 fi
@@ -48,10 +55,25 @@ FOLDER_NAME=$(date -j -f "%Y-%m-%d" "$DATE" "+%m-%d-%Y" 2>/dev/null || date -d "
 DATASET="gencast_export_data"
 BUCKET="gencast-export-bucket"
 
-# If forecast files already exist, just re-run merge
-if [ -d "$FOLDER_NAME" ] && ls "$FOLDER_NAME"/*.csv 1> /dev/null 2>&1; then
-    echo "✅ Forecast files for $DATE already exist in $FOLDER_NAME. Reprocessing with merge..."
-    ./merge
+# First check if filtered file exists - if it does, just do the upload
+FILTERED_FILE="filtered_master_$FOLDER_NAME.csv"
+if [ -f "$FILTERED_FILE" ]; then
+  echo "✅ Filtered file already exists: $FILTERED_FILE"
+  # Add upload_time column to filtered CSV for Supabase upload
+  UPLOAD_FILE="ready_for_upload.csv"
+  UPLOAD_TIME=$(date +"%Y-%m-%dT%H:%M:%S")  # Use current time for upload timestamp
+  echo "Adding upload_time column with value $UPLOAD_TIME to $FILTERED_FILE..."
+  awk -v t="$UPLOAD_TIME" 'BEGIN{FS=OFS=","} NR==1{$0="upload_time,"$0} NR>1{$0=t","$0} 1' "$FILTERED_FILE" > "$UPLOAD_FILE"
+  echo "Ready for upload: $UPLOAD_FILE"
+  
+  # Upload to Supabase using psql
+  if [ -f "$UPLOAD_FILE" ]; then
+    echo "Uploading $UPLOAD_FILE directly to data_points table..."
+    psql "$SUPABASE_CONN" -c "SET statement_timeout = '1h'; SET work_mem = '1GB'; \copy data_points(upload_time,forecast_time,latitude,longitude,population,temp_2m) FROM '$UPLOAD_FILE' DELIMITER ',' CSV HEADER;"
+    echo "Upload to data_points table complete."
+  else
+    echo "Warning: $UPLOAD_FILE not found, skipping upload."
+  fi
     exit 0
 fi
 
@@ -60,7 +82,45 @@ if [ -d "$FOLDER_NAME" ] && [ -f "master_$FOLDER_NAME.csv" ]; then
     echo "✅ Data for $DATE already exists:"
     echo "   - Directory: $FOLDER_NAME"
     echo "   - Master file: master_$FOLDER_NAME.csv"
-    echo "Skipping download and processing..."
+    
+    # Skip to filtering and upload
+    MASTER_FILE="master_$FOLDER_NAME.csv"
+    
+    # Run the filter
+    if [ -f "$MASTER_FILE" ]; then
+      ./filter_nonzero_population "$MASTER_FILE"
+    else
+      echo "Warning: $MASTER_FILE not found, skipping filtering."
+      exit 0
+    fi
+
+    # Add upload_time column to filtered CSV for Supabase upload
+    UPLOAD_FILE="ready_for_upload.csv"
+    UPLOAD_TIME=$(date +"%Y-%m-%dT%H:%M:%S")
+    if [ -f "$FILTERED_FILE" ]; then
+      echo "Adding upload_time column with value $UPLOAD_TIME to $FILTERED_FILE..."
+      awk -v t="$UPLOAD_TIME" 'BEGIN{FS=OFS=","} NR==1{$0="upload_time,"$0} NR>1{$0=t","$0} 1' "$FILTERED_FILE" > "$UPLOAD_FILE"
+      echo "Ready for upload: $UPLOAD_FILE"
+    else
+      echo "Warning: $FILTERED_FILE not found, skipping upload file creation."
+      exit 0
+    fi
+
+    # Upload to Supabase using psql
+    if [ -f "$UPLOAD_FILE" ]; then
+      echo "Uploading $UPLOAD_FILE directly to data_points table..."
+      psql "$SUPABASE_CONN" -c "SET statement_timeout = '1h'; SET work_mem = '1GB'; \copy data_points(upload_time,forecast_time,latitude,longitude,population,temp_2m) FROM '$UPLOAD_FILE' DELIMITER ',' CSV HEADER;"
+      echo "Upload to data_points table complete."
+    else
+      echo "Warning: $UPLOAD_FILE not found, skipping upload."
+    fi
+    exit 0
+fi
+
+# If forecast files already exist, just re-run merge
+if [ -d "$FOLDER_NAME" ] && ls "$FOLDER_NAME"/*.csv 1> /dev/null 2>&1; then
+    echo "✅ Forecast files for $DATE already exist in $FOLDER_NAME. Reprocessing with merge..."
+    ./merge
     exit 0
 fi
 
@@ -146,3 +206,34 @@ gsutil -m rm -r "gs://$BUCKET/$FOLDER_NAME/" || { echo "Warning: Failed to delet
 echo "Download complete, processing into population-weighted CSV."
 
 ./merge
+
+# Filter out rows with zero population
+MASTER_FILE="master_$FOLDER_NAME.csv"
+if [ -f "$MASTER_FILE" ]; then
+  ./filter_nonzero_population "$MASTER_FILE"
+else
+  echo "Warning: $MASTER_FILE not found, skipping filtering."
+  exit 0
+fi
+
+# Add upload_time column to filtered CSV for Supabase upload
+FILTERED_FILE="filtered_$MASTER_FILE"
+UPLOAD_FILE="ready_for_upload.csv"
+UPLOAD_TIME=$(date +"%Y-%m-%dT%H:%M:%S")
+if [ -f "$FILTERED_FILE" ]; then
+  echo "Adding upload_time column with value $UPLOAD_TIME to $FILTERED_FILE..."
+  awk -v t="$UPLOAD_TIME" 'BEGIN{FS=OFS=","} NR==1{$0="upload_time,"$0} NR>1{$0=t","$0} 1' "$FILTERED_FILE" > "$UPLOAD_FILE"
+  echo "Ready for upload: $UPLOAD_FILE"
+else
+  echo "Warning: $FILTERED_FILE not found, skipping upload file creation."
+  exit 0
+fi
+
+# Upload to Supabase using psql
+if [ -f "$UPLOAD_FILE" ]; then
+  echo "Uploading $UPLOAD_FILE directly to data_points table..."
+  psql "$SUPABASE_CONN" -c "SET statement_timeout = '1h'; SET work_mem = '1GB'; \copy data_points(upload_time,forecast_time,latitude,longitude,population,temp_2m) FROM '$UPLOAD_FILE' DELIMITER ',' CSV HEADER;"
+  echo "Upload to data_points table complete."
+else
+  echo "Warning: $UPLOAD_FILE not found, skipping upload."
+fi

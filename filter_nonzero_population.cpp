@@ -1,21 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <filesystem>
 #include <string>
-#include <iomanip>
-#include <cmath>
-
-namespace fs = std::filesystem;
-
-// Check if point is within US bounds
-bool in_us_bounds(double lat, double lon) {
-    // Round to 2 decimal places for consistent comparison
-    lat = std::round(lat * 100.0) / 100.0;
-    lon = std::round(lon * 100.0) / 100.0;
-    return (lat >= 24.25 && lat <= 49.25) &&
-           (lon >= -125.00 && lon <= -67.00);
-}
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
@@ -24,7 +10,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::string masterFile = argv[1];
-    std::string outputFile = "us_" + masterFile;
+    std::string outputFile = "filtered_" + masterFile;
 
     std::ifstream in(masterFile);
     if (!in.is_open()) {
@@ -44,24 +30,32 @@ int main(int argc, char* argv[]) {
 
     int totalCount = 0;
     int keptCount = 0;
+    int removedCount = 0;
 
     while (getline(in, line)) {
         std::stringstream ss(line);
-        std::string timestamp;
-        double lat, lon, pop, temp;
-        char comma;
-
+        std::string timestamp, lat_str, lon_str, pop_str, temp_str;
         getline(ss, timestamp, ',');
-        ss >> lat >> comma >> lon >> comma >> pop >> comma >> temp;
+        getline(ss, lat_str, ',');
+        getline(ss, lon_str, ',');
+        getline(ss, pop_str, ',');
+        getline(ss, temp_str, ',');
 
-        if (in_us_bounds(lat, lon)) {
-            out << line << std::endl;
-            keptCount++;
-        }
         totalCount++;
+        try {
+            double pop = std::stod(pop_str);
+            if (pop > 0) {
+                out << line << std::endl;
+                keptCount++;
+            } else {
+                removedCount++;
+            }
+        } catch (...) {
+            removedCount++;
+        }
     }
 
     std::cout << "✅ Done. Output saved to " << outputFile << std::endl;
-    std::cout << "Kept " << keptCount << " out of " << totalCount << " locations" << std::endl;
+    std::cout << "Kept " << keptCount << " out of " << totalCount << " rows (" << removedCount << " removed)" << std::endl;
     return 0;
 } 
