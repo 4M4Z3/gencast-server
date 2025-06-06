@@ -62,17 +62,60 @@ if [ -f "$FILTERED_FILE" ]; then
   # Add upload_time column to filtered CSV for Supabase upload
   UPLOAD_FILE="ready_for_upload.csv"
   UPLOAD_TIME=$(date +"%Y-%m-%dT%H:%M:%S")  # Use current time for upload timestamp
-  echo "Adding upload_time column with value $UPLOAD_TIME to $FILTERED_FILE..."
-  awk -v t="$UPLOAD_TIME" 'BEGIN{FS=OFS=","} NR==1{$0="upload_time,"$0} NR>1{$0=t","$0} 1' "$FILTERED_FILE" > "$UPLOAD_FILE"
+  echo "Transforming data into JSONB format..."
+  # Create a temporary file for the transformed data
+  TMP_FILE="transformed_data.csv"
+  
+  # Use awk to transform the data into JSONB format
+  awk -F',' '
+    BEGIN {
+      OFS=",";
+      print "forecast_time,latitude,longitude,population,forecasts"
+    }
+    NR > 1 {
+      key = $2 "," $3 "," $4
+      if (!(key in base_data)) {
+        timestamp = $1
+        gsub(/ UTC$/, "", timestamp)
+        base_data[key] = timestamp "," $2 "," $3 "," $4
+        forecasts[key] = "["
+      }
+      if (forecasts[key] != "[") {
+        forecasts[key] = forecasts[key] ","
+      }
+      forecasts[key] = forecasts[key] "{\"time\":\"" $1 "\",\"temp_2m\":" $5 "}"
+    }
+    END {
+      for (key in base_data) {
+        jsonb = "{\"forecasts\":" forecasts[key] "]}"
+        # Double the double quotes for CSV
+        gsub(/\"/, "\"\"", jsonb)
+        print base_data[key] ",\"" jsonb "\""
+      }
+    }
+  ' "$FILTERED_FILE" >> "$TMP_FILE"
+  
+  # Move the transformed file to the upload file
+  mv "$TMP_FILE" "$UPLOAD_FILE"
   echo "Ready for upload: $UPLOAD_FILE"
   
   # Upload to Supabase using psql
   if [ -f "$UPLOAD_FILE" ]; then
-    echo "Uploading $UPLOAD_FILE directly to data_points table..."
-    psql "$SUPABASE_CONN" -c "SET statement_timeout = '1h'; SET work_mem = '1GB'; \copy data_points(upload_time,forecast_time,latitude,longitude,population,temp_2m) FROM '$UPLOAD_FILE' DELIMITER ',' CSV HEADER;"
-    echo "Upload to data_points table complete."
+    echo "Uploading $UPLOAD_FILE directly to points table..."
+    if psql "$SUPABASE_CONN" -c "\copy points(forecast_time,latitude,longitude,population,forecasts) FROM '$UPLOAD_FILE' WITH (FORMAT csv, HEADER true);" ; then
+      echo "Upload to points table complete."
+      if [ -n "$UPLOAD_ID" ]; then
+        psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'success', updated_at = CURRENT_TIMESTAMP WHERE id = $UPLOAD_ID;"
+      fi
+    else
+      echo "Upload failed."
+      if [ -n "$UPLOAD_ID" ]; then
+        psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Upload failed', updated_at = CURRENT_TIMESTAMP WHERE id = $UPLOAD_ID;"
+      fi
+    fi
   else
     echo "Warning: $UPLOAD_FILE not found, skipping upload."
+    psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Upload file not found', updated_at = CURRENT_TIMESTAMP WHERE id = $UPLOAD_ID;"
   fi
     exit 0
 fi
@@ -94,25 +137,67 @@ if [ -d "$FOLDER_NAME" ] && [ -f "master_$FOLDER_NAME.csv" ]; then
       exit 0
     fi
 
-    # Add upload_time column to filtered CSV for Supabase upload
+    # Transform filtered data into JSONB format
+    FILTERED_FILE="filtered_master_$FOLDER_NAME.csv"
     UPLOAD_FILE="ready_for_upload.csv"
-    UPLOAD_TIME=$(date +"%Y-%m-%dT%H:%M:%S")
     if [ -f "$FILTERED_FILE" ]; then
-      echo "Adding upload_time column with value $UPLOAD_TIME to $FILTERED_FILE..."
-      awk -v t="$UPLOAD_TIME" 'BEGIN{FS=OFS=","} NR==1{$0="upload_time,"$0} NR>1{$0=t","$0} 1' "$FILTERED_FILE" > "$UPLOAD_FILE"
+      echo "Transforming filtered data into JSONB format..."
+      # Create the upload file with headers
+      # Count the number of unique points
+      POINTS_COUNT=$(awk -F',' 'NR>1 {print $2 "," $3 "," $4} END {print "Total unique points: " NR-1}' "$FILTERED_FILE" | sort -u | wc -l)
+      
+      # Create upload record
+      echo "Creating upload record..."
+      UPLOAD_ID=$(psql "$SUPABASE_CONN" -t -A -c "INSERT INTO uploads (forecast_date, points_count, status) VALUES ('$DATE', $POINTS_COUNT, 'in_progress') RETURNING id;" | head -n 1 | tr -d '[:space:]')
+      
+      # Use awk to transform the data into JSONB format
+      awk -F',' '
+        BEGIN {
+          OFS=",";
+          print "forecast_time,latitude,longitude,population,forecasts"
+        }
+        NR > 1 {
+          key = $2 "," $3 "," $4
+          if (!(key in base_data)) {
+            timestamp = $1
+            gsub(/ UTC$/, "", timestamp)
+            base_data[key] = timestamp "," $2 "," $3 "," $4
+            forecasts[key] = "["
+          }
+          if (forecasts[key] != "[") {
+            forecasts[key] = forecasts[key] ","
+          }
+          forecasts[key] = forecasts[key] "{\"time\":\"" $1 "\",\"temp_2m\":" $5 "}"
+        }
+        END {
+          for (key in base_data) {
+            jsonb = "{\"forecasts\":" forecasts[key] "]}"
+            # Double the double quotes for CSV
+            gsub(/\"/, "\"\"", jsonb)
+            print base_data[key] ",\"" jsonb "\""
+          }
+        }
+      ' "$FILTERED_FILE" > "$UPLOAD_FILE"
       echo "Ready for upload: $UPLOAD_FILE"
     else
       echo "Warning: $FILTERED_FILE not found, skipping upload file creation."
+      psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Filtered file not found' WHERE id = $UPLOAD_ID;"
       exit 0
     fi
 
     # Upload to Supabase using psql
     if [ -f "$UPLOAD_FILE" ]; then
-      echo "Uploading $UPLOAD_FILE directly to data_points table..."
-      psql "$SUPABASE_CONN" -c "SET statement_timeout = '1h'; SET work_mem = '1GB'; \copy data_points(upload_time,forecast_time,latitude,longitude,population,temp_2m) FROM '$UPLOAD_FILE' DELIMITER ',' CSV HEADER;"
-      echo "Upload to data_points table complete."
+      echo "Uploading $UPLOAD_FILE directly to points table..."
+      if psql "$SUPABASE_CONN" -c "\copy points(forecast_time,latitude,longitude,population,forecasts) FROM '$UPLOAD_FILE' WITH (FORMAT csv, HEADER true);" ; then
+        echo "Upload to points table complete."
+        psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'success', updated_at = CURRENT_TIMESTAMP WHERE id = $UPLOAD_ID;"
+      else
+        echo "Upload failed."
+        psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Upload failed', updated_at = CURRENT_TIMESTAMP WHERE id = $UPLOAD_ID;"
+      fi
     else
       echo "Warning: $UPLOAD_FILE not found, skipping upload."
+      psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Upload file not found', updated_at = CURRENT_TIMESTAMP WHERE id = $UPLOAD_ID;"
     fi
     exit 0
 fi
@@ -216,24 +301,65 @@ else
   exit 0
 fi
 
-# Add upload_time column to filtered CSV for Supabase upload
-FILTERED_FILE="filtered_$MASTER_FILE"
+# Transform filtered data into JSONB format
+FILTERED_FILE="filtered_master_$FOLDER_NAME.csv"
 UPLOAD_FILE="ready_for_upload.csv"
-UPLOAD_TIME=$(date +"%Y-%m-%dT%H:%M:%S")
 if [ -f "$FILTERED_FILE" ]; then
-  echo "Adding upload_time column with value $UPLOAD_TIME to $FILTERED_FILE..."
-  awk -v t="$UPLOAD_TIME" 'BEGIN{FS=OFS=","} NR==1{$0="upload_time,"$0} NR>1{$0=t","$0} 1' "$FILTERED_FILE" > "$UPLOAD_FILE"
+  echo "Transforming filtered data into JSONB format..."
+  # Create the upload file with headers
+  # Count the number of unique points
+  POINTS_COUNT=$(awk -F',' 'NR>1 {print $2 "," $3 "," $4} END {print "Total unique points: " NR-1}' "$FILTERED_FILE" | sort -u | wc -l)
+  
+  # Create upload record
+  echo "Creating upload record..."
+  UPLOAD_ID=$(psql "$SUPABASE_CONN" -t -A -c "INSERT INTO uploads (forecast_date, points_count, status) VALUES ('$DATE', $POINTS_COUNT, 'in_progress') RETURNING id;" | head -n 1 | tr -d '[:space:]')
+  
+  # Use awk to transform the data into JSONB format
+  awk -F',' '
+    BEGIN {
+      OFS=",";
+      print "forecast_time,latitude,longitude,population,forecasts"
+    }
+    NR > 1 {
+      key = $2 "," $3 "," $4
+      if (!(key in base_data)) {
+        timestamp = $1
+        gsub(/ UTC$/, "", timestamp)
+        base_data[key] = timestamp "," $2 "," $3 "," $4
+        forecasts[key] = "["
+      }
+      if (forecasts[key] != "[") {
+        forecasts[key] = forecasts[key] ","
+      }
+      forecasts[key] = forecasts[key] "{\"time\":\"" $1 "\",\"temp_2m\":" $5 "}"
+    }
+    END {
+      for (key in base_data) {
+        jsonb = "{\"forecasts\":" forecasts[key] "]}"
+        # Double the double quotes for CSV
+        gsub(/\"/, "\"\"", jsonb)
+        print base_data[key] ",\"" jsonb "\""
+      }
+    }
+  ' "$FILTERED_FILE" > "$UPLOAD_FILE"
   echo "Ready for upload: $UPLOAD_FILE"
 else
   echo "Warning: $FILTERED_FILE not found, skipping upload file creation."
+  psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Filtered file not found' WHERE id = $UPLOAD_ID;"
   exit 0
 fi
 
 # Upload to Supabase using psql
 if [ -f "$UPLOAD_FILE" ]; then
-  echo "Uploading $UPLOAD_FILE directly to data_points table..."
-  psql "$SUPABASE_CONN" -c "SET statement_timeout = '1h'; SET work_mem = '1GB'; \copy data_points(upload_time,forecast_time,latitude,longitude,population,temp_2m) FROM '$UPLOAD_FILE' DELIMITER ',' CSV HEADER;"
-  echo "Upload to data_points table complete."
+  echo "Uploading $UPLOAD_FILE directly to points table..."
+  if psql "$SUPABASE_CONN" -c "\copy points(forecast_time,latitude,longitude,population,forecasts) FROM '$UPLOAD_FILE' WITH (FORMAT csv, HEADER true);" ; then
+    echo "Upload to points table complete."
+    psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'success', updated_at = CURRENT_TIMESTAMP WHERE id = $UPLOAD_ID;"
+  else
+    echo "Upload failed."
+    psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Upload failed', updated_at = CURRENT_TIMESTAMP WHERE id = $UPLOAD_ID;"
+  fi
 else
   echo "Warning: $UPLOAD_FILE not found, skipping upload."
+  psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Upload file not found', updated_at = CURRENT_TIMESTAMP WHERE id = $UPLOAD_ID;"
 fi
