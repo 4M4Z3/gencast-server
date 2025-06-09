@@ -206,14 +206,85 @@ fi
 if [ -d "$FOLDER_NAME" ] && ls "$FOLDER_NAME"/*.csv 1> /dev/null 2>&1; then
     echo "✅ Forecast files for $DATE already exist in $FOLDER_NAME. Reprocessing with merge..."
     ./merge
+    
+    # Filter out rows with zero population
+    MASTER_FILE="master_$FOLDER_NAME.csv"
+    if [ -f "$MASTER_FILE" ]; then
+      ./filter_nonzero_population "$MASTER_FILE"
+    else
+      echo "Warning: $MASTER_FILE not found, skipping filtering."
+      exit 0
+    fi
+
+    # Transform filtered data into JSONB format and upload
+    FILTERED_FILE="filtered_master_$FOLDER_NAME.csv"
+    if [ -f "$FILTERED_FILE" ]; then
+      echo "Transforming filtered data into JSONB format..."
+      # Create the upload file with headers
+      # Count the number of unique points
+      POINTS_COUNT=$(awk -F',' 'NR>1 {print $2 "," $3 "," $4} END {print "Total unique points: " NR-1}' "$FILTERED_FILE" | sort -u | wc -l)
+      
+      # Create upload record
+      echo "Creating upload record..."
+      UPLOAD_ID=$(psql "$SUPABASE_CONN" -t -A -c "INSERT INTO uploads (forecast_date, points_count, status) VALUES ('$DATE', $POINTS_COUNT, 'in_progress') RETURNING id;" | head -n 1 | tr -d '[:space:]')
+      
+      # Use awk to transform the data into JSONB format
+      awk -F',' '
+        BEGIN {
+          OFS=",";
+          print "forecast_time,latitude,longitude,population,forecasts"
+        }
+        NR > 1 {
+          key = $2 "," $3 "," $4
+          if (!(key in base_data)) {
+            timestamp = $1
+            gsub(/ UTC$/, "", timestamp)
+            base_data[key] = timestamp "," $2 "," $3 "," $4
+            forecasts[key] = "["
+          }
+          if (forecasts[key] != "[") {
+            forecasts[key] = forecasts[key] ","
+          }
+          forecasts[key] = forecasts[key] "{\"time\":\"" $1 "\",\"temp_2m\":" $5 ",\"temp_2m_stddev\":" $6 ",\"temp_2m_min\":" $7 ",\"temp_2m_max\":" $8 "}"
+        }
+        END {
+          for (key in base_data) {
+            jsonb = "{\"forecasts\":" forecasts[key] "]}"
+            # Double the double quotes for CSV
+            gsub(/\"/, "\"\"", jsonb)
+            print base_data[key] ",\"" jsonb "\""
+          }
+        }
+      ' "$FILTERED_FILE" > "$UPLOAD_FILE"
+      echo "Ready for upload: $UPLOAD_FILE"
+    else
+      echo "Warning: $FILTERED_FILE not found, skipping upload file creation."
+      psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Filtered file not found' WHERE id = $UPLOAD_ID;"
+      exit 0
+    fi
+
+    # Upload to Supabase using psql
+    if [ -f "$UPLOAD_FILE" ]; then
+      echo "Uploading $UPLOAD_FILE directly to points table..."
+      if psql "$SUPABASE_CONN" -c "\copy points(forecast_time,latitude,longitude,population,forecasts) FROM '$UPLOAD_FILE' WITH (FORMAT csv, HEADER true);" ; then
+        echo "Upload to points table complete."
+        psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'success', updated_at = CURRENT_TIMESTAMP WHERE id = $UPLOAD_ID;"
+      else
+        echo "Upload failed."
+        psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Upload failed', updated_at = CURRENT_TIMESTAMP WHERE id = $UPLOAD_ID;"
+      fi
+    else
+      echo "Warning: $UPLOAD_FILE not found, skipping upload."
+      psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Upload file not found', updated_at = CURRENT_TIMESTAMP WHERE id = $UPLOAD_ID;"
+    fi
     exit 0
 fi
 
 # Cost estimate
 echo -e "\nCost per run:"
-echo "Estimated ~17.39 GB scanned on BigQuery"
+echo "Estimated ~47.53 GB scanned on BigQuery"
 echo "Cost per TB scanned = \$5"
-echo "17.39 GB * (1 TB / 1000 GB) * \$5 = ~\$0.08695\n"
+echo "47.53 GB * (1 TB / 1000 GB) * \$5 = ~\$0.24\n"
 
 # Check if Google Cloud SDK is installed
 if ! command -v gcloud &> /dev/null; then
@@ -294,8 +365,6 @@ echo "→ Deleting GCS folder: gs://$BUCKET/$FOLDER_NAME/"
 gsutil -m rm -r "gs://$BUCKET/$FOLDER_NAME/" || { echo "Warning: Failed to delete GCS folder"; }
 
 echo "Download complete, processing into population-weighted CSV."
-
-./merge
 
 # Filter out rows with zero population
 MASTER_FILE="master_$FOLDER_NAME.csv"

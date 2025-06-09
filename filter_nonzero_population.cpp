@@ -2,6 +2,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
@@ -34,16 +35,17 @@ int main(int argc, char* argv[]) {
 
     while (getline(in, line)) {
         std::stringstream ss(line);
-        std::string timestamp, lat_str, lon_str, pop_str, temp_str;
-        getline(ss, timestamp, ',');
-        getline(ss, lat_str, ',');
-        getline(ss, lon_str, ',');
-        getline(ss, pop_str, ',');
-        getline(ss, temp_str, ',');
+        std::string field;
+        std::vector<std::string> fields;
+        
+        // Split line into fields
+        while (getline(ss, field, ',')) {
+            fields.push_back(field);
+        }
 
         totalCount++;
         try {
-            double pop = std::stod(pop_str);
+            double pop = std::stod(fields[3]); // Population is the 4th field
             if (pop > 0) {
                 out << line << std::endl;
                 keptCount++;

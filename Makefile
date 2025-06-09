@@ -30,6 +30,7 @@ delete_data$(EXE): delete_data.cpp
 run: all
 	@echo "Running complete workflow..."
 	@echo "1. Fetching data from BigQuery..."
+	@echo "   Cost estimate: ~$$0.24 (47.53 GB scanned at $$5/TB)"
 	$(SAVE_QUERY)
 	@echo "2. Processing data with merge program..."
 	./merge$(EXE)
@@ -42,6 +43,7 @@ run: all
 run-no-delete: all
 	@echo "Running workflow without cleanup..."
 	@echo "1. Fetching data from BigQuery..."
+	@echo "   Cost estimate: ~$$0.24 (47.53 GB scanned at $$5/TB)"
 	$(SAVE_QUERY)
 	@echo "2. Processing data with merge program..."
 	./merge$(EXE)
