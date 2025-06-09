@@ -89,7 +89,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Total population entries: " << populationMap.size() << "\n";
 
     std::ofstream out("master_" + date + ".csv");
-    out << "forecast_time,latitude,longitude,population,temp_2m\n";
+    out << "forecast_time,latitude,longitude,population,temp_2m,temp_2m_stddev,temp_2m_min,temp_2m_max\n";
 
     int matchCount = 0;
     int totalCount = 0;
@@ -106,11 +106,11 @@ int main(int argc, char* argv[]) {
             while (getline(forecastFile, row)) {
                 std::stringstream ss(row);
                 std::string timestamp;
-                double lat, lon, temp;
+                double lat, lon, temp, temp_stddev, temp_min, temp_max;
                 char comma;
 
                 getline(ss, timestamp, ',');
-                ss >> lat >> comma >> lon >> comma >> temp;
+                ss >> lat >> comma >> lon >> comma >> temp >> comma >> temp_stddev >> comma >> temp_min >> comma >> temp_max;
 
                 // Convert forecast longitude to 0-360 system
                 if (lon < 0) lon += 360.0;
@@ -122,7 +122,14 @@ int main(int argc, char* argv[]) {
                 LatLon key{lat, lon};
                 if (populationMap.count(key)) {
                     out << std::fixed << std::setprecision(6)
-                        << timestamp << "," << lat << "," << lon << "," << populationMap[key] << "," << temp << "\n";
+                        << timestamp << "," 
+                        << lat << "," 
+                        << lon << "," 
+                        << populationMap[key] << "," 
+                        << temp << ","
+                        << temp_stddev << ","
+                        << temp_min << ","
+                        << temp_max << "\n";
                     matchCount++;
                 }
                 totalCount++;

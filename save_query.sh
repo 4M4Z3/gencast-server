@@ -167,7 +167,7 @@ if [ -d "$FOLDER_NAME" ] && [ -f "master_$FOLDER_NAME.csv" ]; then
           if (forecasts[key] != "[") {
             forecasts[key] = forecasts[key] ","
           }
-          forecasts[key] = forecasts[key] "{\"time\":\"" $1 "\",\"temp_2m\":" $5 "}"
+          forecasts[key] = forecasts[key] "{\"time\":\"" $1 "\",\"temp_2m\":" $5 ",\"temp_2m_stddev\":" $6 ",\"temp_2m_min\":" $7 ",\"temp_2m_max\":" $8 "}"
         }
         END {
           for (key in base_data) {
@@ -259,15 +259,20 @@ bq query \
     f.time AS forecast_time,
     ST_Y(t.geography) AS latitude,
     ST_X(t.geography) AS longitude,
-    e.2m_temperature AS temp_2m
+    AVG(e.2m_temperature) AS temp_2m,
+    STDDEV(e.2m_temperature) AS temp_2m_stddev,
+    MIN(e.2m_temperature) AS temp_2m_min,
+    MAX(e.2m_temperature) AS temp_2m_max
   FROM
     \`$PROJECT.weathernext_gen_forecasts.126478713_1_0\` AS t,
     UNNEST(t.forecast) AS f,
     UNNEST(f.ensemble) AS e
   WHERE
     t.init_time = TIMESTAMP(\"$DATE\")
-    AND e.ensemble_member = '5'
-  ORDER BY forecast_time, latitude, longitude
+  GROUP BY
+    forecast_time, latitude, longitude
+  ORDER BY 
+    forecast_time, latitude, longitude
   "
 
 echo "→ Exporting table to GCS: gs://$BUCKET/$FOLDER_NAME/"
@@ -331,7 +336,7 @@ if [ -f "$FILTERED_FILE" ]; then
       if (forecasts[key] != "[") {
         forecasts[key] = forecasts[key] ","
       }
-      forecasts[key] = forecasts[key] "{\"time\":\"" $1 "\",\"temp_2m\":" $5 "}"
+      forecasts[key] = forecasts[key] "{\"time\":\"" $1 "\",\"temp_2m\":" $5 ",\"temp_2m_stddev\":" $6 ",\"temp_2m_min\":" $7 ",\"temp_2m_max\":" $8 "}"
     }
     END {
       for (key in base_data) {
