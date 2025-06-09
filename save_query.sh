@@ -14,12 +14,22 @@ set -e
 upload_data() {
     local upload_file=$1
     local upload_id=$2
-    local batch_size=1000  # Process 1,000 rows at a time
+    local batch_size=10000  # Process 10,000 rows at a time
     
     if [ ! -f "$upload_file" ]; then
         echo "Error: Upload file $upload_file not found"
         if [ -n "$upload_id" ]; then
             psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Upload file not found', updated_at = CURRENT_TIMESTAMP WHERE id = $upload_id;"
+        fi
+        return 1
+    fi
+
+    # Delete existing data for this forecast date
+    echo "Deleting existing data for forecast date $DATE..."
+    if ! psql "$SUPABASE_CONN" -c "DELETE FROM points WHERE DATE(forecast_time) = DATE('$DATE');" ; then
+        echo "Error: Failed to delete existing data"
+        if [ -n "$upload_id" ]; then
+            psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Failed to delete existing data', updated_at = CURRENT_TIMESTAMP WHERE id = $upload_id;"
         fi
         return 1
     fi
@@ -31,8 +41,6 @@ upload_data() {
     total_lines=$((total_lines - 1))  # Subtract header
     total_batches=$(( (total_lines + batch_size - 1) / batch_size ))
     
-    echo "Total lines to upload: $total_lines (in $total_batches batches)"
-    
     # Create temporary directory for batches
     temp_dir=$(mktemp -d)
     trap 'rm -rf "$temp_dir"' EXIT
@@ -42,21 +50,18 @@ upload_data() {
     tail -n +2 "$upload_file" | split -l "$batch_size" - "$temp_dir/batch_"
     
     # Process each batch
-    current_batch=0
     for batch_file in "$temp_dir"/batch_*; do
-        current_batch=$((current_batch + 1))
         # Add header to batch
         cat "$temp_dir/header" "$batch_file" > "$batch_file.with_header"
         
-        echo "Uploading batch $current_batch of $total_batches..."
+        echo "Uploading batch $(basename "$batch_file")..."
         if ! psql "$SUPABASE_CONN" -c "SET statement_timeout = '300000';" -c "\copy points(forecast_time,latitude,longitude,population,forecasts) FROM '$batch_file.with_header' WITH (FORMAT csv, HEADER true);" ; then
-            echo "Upload failed for batch $current_batch"
+            echo "Upload failed for batch $(basename "$batch_file")"
             if [ -n "$upload_id" ]; then
-                psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Upload failed on batch $current_batch', updated_at = CURRENT_TIMESTAMP WHERE id = $upload_id;"
+                psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Upload failed on batch $(basename "$batch_file")', updated_at = CURRENT_TIMESTAMP WHERE id = $upload_id;"
             fi
             return 1
         fi
-        echo "✓ Batch $current_batch complete"
     done
     
     echo "All batches uploaded successfully"
@@ -96,10 +101,8 @@ transform_data() {
             # Handle null/empty values
             temp_2m = ($5 == "" ? "null" : $5)
             temp_2m_stddev = ($6 == "" ? "null" : $6)
-            temp_2m_min = ($7 == "" ? "null" : $7)
-            temp_2m_max = ($8 == "" ? "null" : $8)
             
-            forecasts[key] = forecasts[key] "{\"time\":\"" $1 "\",\"temp_2m\":" temp_2m ",\"temp_2m_stddev\":" temp_2m_stddev ",\"temp_2m_min\":" temp_2m_min ",\"temp_2m_max\":" temp_2m_max "}"
+            forecasts[key] = forecasts[key] "{\"t\":\"" $1 "\",\"v\":" temp_2m ",\"s\":" temp_2m_stddev "}"
         }
         END {
             for (key in base_data) {
@@ -219,10 +222,8 @@ if [ -f "$FILTERED_FILE" ]; then
       # Handle null/empty values
       temp_2m = ($5 == "" ? "null" : $5)
       temp_2m_stddev = ($6 == "" ? "null" : $6)
-      temp_2m_min = ($7 == "" ? "null" : $7)
-      temp_2m_max = ($8 == "" ? "null" : $8)
       
-      forecasts[key] = forecasts[key] "{\"time\":\"" $1 "\",\"temp_2m\":" temp_2m ",\"temp_2m_stddev\":" temp_2m_stddev ",\"temp_2m_min\":" temp_2m_min ",\"temp_2m_max\":" temp_2m_max "}"
+      forecasts[key] = forecasts[key] "{\"t\":\"" $1 "\",\"v\":" temp_2m ",\"s\":" temp_2m_stddev "}"
     }
     END {
       for (key in base_data) {
@@ -308,10 +309,8 @@ if [ -d "$FOLDER_NAME" ] && [ -f "master_$FOLDER_NAME.csv" ]; then
             # Handle null/empty values
             temp_2m = ($5 == "" ? "null" : $5)
             temp_2m_stddev = ($6 == "" ? "null" : $6)
-            temp_2m_min = ($7 == "" ? "null" : $7)
-            temp_2m_max = ($8 == "" ? "null" : $8)
             
-            forecasts[key] = forecasts[key] "{\"time\":\"" $1 "\",\"temp_2m\":" temp_2m ",\"temp_2m_stddev\":" temp_2m_stddev ",\"temp_2m_min\":" temp_2m_min ",\"temp_2m_max\":" temp_2m_max "}"
+            forecasts[key] = forecasts[key] "{\"t\":\"" $1 "\",\"v\":" temp_2m ",\"s\":" temp_2m_stddev "}"
         }
         END {
             for (key in base_data) {
@@ -384,10 +383,8 @@ if [ -d "$FOLDER_NAME" ] && ls "$FOLDER_NAME"/*.csv 1> /dev/null 2>&1; then
             # Handle null/empty values
             temp_2m = ($5 == "" ? "null" : $5)
             temp_2m_stddev = ($6 == "" ? "null" : $6)
-            temp_2m_min = ($7 == "" ? "null" : $7)
-            temp_2m_max = ($8 == "" ? "null" : $8)
             
-            forecasts[key] = forecasts[key] "{\"time\":\"" $1 "\",\"temp_2m\":" temp_2m ",\"temp_2m_stddev\":" temp_2m_stddev ",\"temp_2m_min\":" temp_2m_min ",\"temp_2m_max\":" temp_2m_max "}"
+            forecasts[key] = forecasts[key] "{\"t\":\"" $1 "\",\"v\":" temp_2m ",\"s\":" temp_2m_stddev "}"
         }
         END {
             for (key in base_data) {
@@ -465,9 +462,7 @@ bq query \
     ST_Y(t.geography) AS latitude,
     ST_X(t.geography) AS longitude,
     AVG(e.2m_temperature) AS temp_2m,
-    STDDEV(e.2m_temperature) AS temp_2m_stddev,
-    MIN(e.2m_temperature) AS temp_2m_min,
-    MAX(e.2m_temperature) AS temp_2m_max
+    STDDEV(e.2m_temperature) AS temp_2m_stddev
   FROM
     \`$PROJECT.weathernext_gen_forecasts.126478713_1_0\` AS t,
     UNNEST(t.forecast) AS f,
