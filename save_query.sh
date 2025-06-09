@@ -24,9 +24,57 @@ upload_data() {
         return 1
     fi
 
-    # Delete existing data for this forecast date
-    echo "Deleting existing data for forecast date $DATE..."
-    if ! psql "$SUPABASE_CONN" -c "DELETE FROM points WHERE DATE(forecast_time) = DATE('$DATE');" ; then
+    # Delete any points from failed uploads for this date
+    echo "Cleaning up any points from previous failed uploads..."
+    if ! psql "$SUPABASE_CONN" -c "DELETE FROM points p USING uploads u WHERE u.forecast_date = DATE('$DATE') AND u.status = 'failure' AND p.forecast_time >= DATE('$DATE');" ; then
+        echo "Warning: Failed to clean up points from previous failed uploads"
+    fi
+
+    # Get min and max dates from the upload file, including dates in the JSON forecasts
+    echo "Determining forecast date range..."
+    MIN_DATE=$(awk -F',' '
+        NR>1 {
+            # Check the forecast_time column
+            if (!min_date || $1 < min_date) min_date = $1
+            
+            # Extract dates from JSON forecasts
+            json = $5
+            while (match(json, /"t":"[^"]+"/)) {
+                date = substr(json, RSTART+5, RLENGTH-6)
+                gsub(/ UTC$/, "", date)  # Remove UTC suffix
+                if (!min_date || date < min_date) min_date = date
+                json = substr(json, RSTART+RLENGTH)
+            }
+        }
+        END {
+            print min_date
+        }
+    ' "$upload_file")
+    
+    MAX_DATE=$(awk -F',' '
+        NR>1 {
+            # Check the forecast_time column
+            if (!max_date || $1 > max_date) max_date = $1
+            
+            # Extract dates from JSON forecasts
+            json = $5
+            while (match(json, /"t":"[^"]+"/)) {
+                date = substr(json, RSTART+5, RLENGTH-6)
+                gsub(/ UTC$/, "", date)  # Remove UTC suffix
+                if (!max_date || date > max_date) max_date = date
+                json = substr(json, RSTART+RLENGTH)
+            }
+        }
+        END {
+            print max_date
+        }
+    ' "$upload_file")
+    
+    echo "Found date range: $MIN_DATE to $MAX_DATE"
+
+    # Delete existing data for the forecast date range
+    echo "Deleting existing data for forecast date range..."
+    if ! psql "$SUPABASE_CONN" -c "DELETE FROM points WHERE forecast_time >= DATE '${MIN_DATE}' AND forecast_time <= DATE '${MAX_DATE}';" ; then
         echo "Error: Failed to delete existing data"
         if [ -n "$upload_id" ]; then
             psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Failed to delete existing data', updated_at = CURRENT_TIMESTAMP WHERE id = $upload_id;"
@@ -55,7 +103,7 @@ upload_data() {
         cat "$temp_dir/header" "$batch_file" > "$batch_file.with_header"
         
         echo "Uploading batch $(basename "$batch_file")..."
-        if ! psql "$SUPABASE_CONN" -c "SET statement_timeout = '300000';" -c "\copy points(forecast_time,latitude,longitude,population,forecasts) FROM '$batch_file.with_header' WITH (FORMAT csv, HEADER true);" ; then
+        if ! psql "$SUPABASE_CONN" -c "SET statement_timeout = '600000';" -c "\copy points(forecast_time,latitude,longitude,population,forecasts) FROM '$batch_file.with_header' WITH (FORMAT csv, HEADER true);" ; then
             echo "Upload failed for batch $(basename "$batch_file")"
             if [ -n "$upload_id" ]; then
                 psql "$SUPABASE_CONN" -c "UPDATE uploads SET status = 'failure', error_message = 'Upload failed on batch $(basename "$batch_file")', updated_at = CURRENT_TIMESTAMP WHERE id = $upload_id;"
